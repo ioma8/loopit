@@ -14,9 +14,18 @@ let callbackCount = 0;
 let lastRms = 0;
 let lastInputChannels = 0;
 let deviceSummary = "No device yet";
+let adaptiveInputGain = 1.0;
+let lastOutputRms = 0;
 
-const WEB_INPUT_GAIN = 10.0;
-const WEB_OUTPUT_GAIN = 4.0;
+const TARGET_INPUT_RMS = 0.02;
+const MIN_INPUT_GAIN = 1.0;
+const MAX_INPUT_GAIN = 18.0;
+const INPUT_GAIN_SMOOTH = 0.08;
+const POST_GAIN = 1.35;
+
+function softClip(sample) {
+  return Math.tanh(sample);
+}
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -60,6 +69,8 @@ function startDiagnostics() {
     `script callbacks: ${callbackCount}`,
     `input channels seen: ${lastInputChannels}`,
     `last RMS: ${lastRms.toFixed(6)}`,
+    `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
+    `output RMS: ${lastOutputRms.toFixed(6)}`,
     deviceSummary,
   ].join("\n\n"));
   diagnosticsInterval = setInterval(() => {
@@ -70,6 +81,8 @@ function startDiagnostics() {
       `script callbacks: ${callbackCount}`,
       `input channels seen: ${lastInputChannels}`,
       `last RMS: ${lastRms.toFixed(6)}`,
+      `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
+      `output RMS: ${lastOutputRms.toFixed(6)}`,
       deviceSummary,
     ].join("\n\n"));
   }, 300);
@@ -155,7 +168,8 @@ async function start() {
       callbackCount += 1;
       lastInputChannels = inputChannels;
 
-      let energy = 0;
+      let inputEnergy = 0;
+      let outputEnergy = 0;
 
       for (let i = 0; i < event.outputBuffer.length; i += 1) {
         let mono = 0;
@@ -168,15 +182,25 @@ async function start() {
           mono /= inputChannels;
         }
 
-        energy += mono * mono;
-        const processed = module.loopit_process(wasmPtr, mono * WEB_INPUT_GAIN) * WEB_OUTPUT_GAIN;
+        inputEnergy += mono * mono;
+
+        const normalizedInput = mono * adaptiveInputGain;
+        const processed = softClip(module.loopit_process(wasmPtr, normalizedInput) * POST_GAIN);
+        outputEnergy += processed * processed;
 
         for (let channel = 0; channel < outputChannels; channel += 1) {
           event.outputBuffer.getChannelData(channel)[i] = processed;
         }
       }
 
-      lastRms = Math.sqrt(energy / Math.max(event.outputBuffer.length, 1));
+      lastRms = Math.sqrt(inputEnergy / Math.max(event.outputBuffer.length, 1));
+      lastOutputRms = Math.sqrt(outputEnergy / Math.max(event.outputBuffer.length, 1));
+
+      const desiredGain = Math.min(
+        MAX_INPUT_GAIN,
+        Math.max(MIN_INPUT_GAIN, TARGET_INPUT_RMS / Math.max(lastRms, 0.0005)),
+      );
+      adaptiveInputGain += INPUT_GAIN_SMOOTH * (desiredGain - adaptiveInputGain);
 
       if (callbackCount <= 5 || callbackCount % 50 === 0) {
         setDebug([
@@ -185,6 +209,8 @@ async function start() {
           `script callbacks: ${callbackCount}`,
           `input channels seen: ${lastInputChannels}`,
           `last RMS: ${lastRms.toFixed(6)}`,
+          `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
+          `output RMS: ${lastOutputRms.toFixed(6)}`,
           deviceSummary,
         ].join("\n\n"));
       }
