@@ -67,17 +67,29 @@ async function start() {
     sourceNode = audioCtx.createMediaStreamSource(stream);
 
     // ScriptProcessor is simple and broadly supported for this demo.
-    processorNode = audioCtx.createScriptProcessor(256, 1, 1);
+    // Firefox can expose microphone input with more than one channel, so we
+    // accept stereo here and mix down manually in the callback.
+    processorNode = audioCtx.createScriptProcessor(256, 2, 1);
     processorNode.onaudioprocess = (event) => {
       if (wasmPtr === null) {
         return;
       }
 
-      const input = event.inputBuffer.getChannelData(0);
+      const inputChannels = event.inputBuffer.numberOfChannels;
       const output = event.outputBuffer.getChannelData(0);
 
-      for (let i = 0; i < input.length; i += 1) {
-        output[i] = module.loopit_process(wasmPtr, input[i]);
+      for (let i = 0; i < output.length; i += 1) {
+        let mono = 0;
+
+        for (let channel = 0; channel < inputChannels; channel += 1) {
+          mono += event.inputBuffer.getChannelData(channel)[i] ?? 0;
+        }
+
+        if (inputChannels > 0) {
+          mono /= inputChannels;
+        }
+
+        output[i] = module.loopit_process(wasmPtr, mono);
       }
     };
 
