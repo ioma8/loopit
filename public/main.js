@@ -1,4 +1,5 @@
 const statusEl = document.getElementById("status");
+const debugEl = document.getElementById("debug");
 const startBtn = document.getElementById("start");
 const stopBtn = document.getElementById("stop");
 
@@ -8,9 +9,65 @@ let processorNode = null;
 let stream = null;
 let wasm = null;
 let wasmPtr = null;
+let diagnosticsInterval = null;
+let callbackCount = 0;
+let lastRms = 0;
+let lastInputChannels = 0;
+let deviceSummary = "No device yet";
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function setDebug(message) {
+  debugEl.textContent = message;
+}
+
+async function updateDeviceSummary() {
+  try {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      deviceSummary = "enumerateDevices() unavailable";
+      return;
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter((device) => device.kind === "audioinput");
+    const audioOutputs = devices.filter((device) => device.kind === "audiooutput");
+    const track = stream?.getAudioTracks?.()[0] ?? null;
+    const settings = track?.getSettings?.() ?? {};
+
+    deviceSummary = [
+      `selected input label: ${track?.label || "unknown"}`,
+      `selected input settings: ${JSON.stringify(settings)}`,
+      `available inputs: ${audioInputs.map((d) => d.label || d.deviceId).join(", ") || "none"}`,
+      `available outputs: ${audioOutputs.map((d) => d.label || d.deviceId).join(", ") || "none"}`,
+      `setSinkId supported: ${typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype}`,
+    ].join("\n");
+  } catch (error) {
+    deviceSummary = `device enumeration failed: ${error.message}`;
+  }
+}
+
+function startDiagnostics() {
+  stopDiagnostics();
+  diagnosticsInterval = setInterval(() => {
+    const contextState = audioCtx ? audioCtx.state : "none";
+    setDebug([
+      `audioContext state: ${contextState}`,
+      `wasm pointer: ${wasmPtr}`,
+      `script callbacks: ${callbackCount}`,
+      `input channels seen: ${lastInputChannels}`,
+      `last RMS: ${lastRms.toFixed(6)}`,
+      deviceSummary,
+    ].join("\n\n"));
+  }, 300);
+}
+
+function stopDiagnostics() {
+  if (diagnosticsInterval) {
+    clearInterval(diagnosticsInterval);
+    diagnosticsInterval = null;
+  }
 }
 
 async function loadWasm() {
@@ -56,6 +113,7 @@ async function start() {
         autoGainControl: false,
       },
     });
+    await updateDeviceSummary();
 
     if (audioCtx.state !== "running") {
       await audioCtx.resume();
@@ -67,18 +125,21 @@ async function start() {
     sourceNode = audioCtx.createMediaStreamSource(stream);
 
     // ScriptProcessor is simple and broadly supported for this demo.
-    // Firefox can expose microphone input with more than one channel, so we
-    // accept stereo here and mix down manually in the callback.
-    processorNode = audioCtx.createScriptProcessor(256, 2, 1);
+    // Accept stereo in/out and mix mono manually so Firefox channel behavior is visible.
+    processorNode = audioCtx.createScriptProcessor(256, 2, 2);
     processorNode.onaudioprocess = (event) => {
       if (wasmPtr === null) {
         return;
       }
 
       const inputChannels = event.inputBuffer.numberOfChannels;
-      const output = event.outputBuffer.getChannelData(0);
+      const outputChannels = event.outputBuffer.numberOfChannels;
+      callbackCount += 1;
+      lastInputChannels = inputChannels;
 
-      for (let i = 0; i < output.length; i += 1) {
+      let energy = 0;
+
+      for (let i = 0; i < event.outputBuffer.length; i += 1) {
         let mono = 0;
 
         for (let channel = 0; channel < inputChannels; channel += 1) {
@@ -89,8 +150,15 @@ async function start() {
           mono /= inputChannels;
         }
 
-        output[i] = module.loopit_process(wasmPtr, mono);
+        energy += mono * mono;
+        const processed = module.loopit_process(wasmPtr, mono);
+
+        for (let channel = 0; channel < outputChannels; channel += 1) {
+          event.outputBuffer.getChannelData(channel)[i] = processed;
+        }
       }
+
+      lastRms = Math.sqrt(energy / Math.max(event.outputBuffer.length, 1));
     };
 
     sourceNode.connect(processorNode);
@@ -102,9 +170,11 @@ async function start() {
 
     stopBtn.disabled = false;
     setStatus(`Running at ${sampleRate} Hz (context: ${audioCtx.state}, ptr: ${wasmPtr})`);
+    startDiagnostics();
   } catch (error) {
     console.error(error);
     setStatus(`Error: ${error.message}`);
+    setDebug(`Startup error:\n${error.stack || error.message}`);
     startBtn.disabled = false;
   }
 }
@@ -139,6 +209,8 @@ function stop() {
   stopBtn.disabled = true;
   startBtn.disabled = false;
   setStatus("Stopped");
+  stopDiagnostics();
+  setDebug("Stopped");
 }
 
 startBtn.addEventListener("click", () => {

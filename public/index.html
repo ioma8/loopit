@@ -81,6 +81,22 @@
         font-size: 0.95rem;
       }
 
+      .debug {
+        margin-top: 14px;
+        padding: 12px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.22);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .debug pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #cbd7ff;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
       code {
         background: rgba(255, 255, 255, 0.08);
         border-radius: 6px;
@@ -100,6 +116,9 @@
         <button id="stop" disabled>Stop</button>
       </div>
       <div class="status" id="status">Idle</div>
+      <div class="debug">
+        <pre id="debug">Debug output will appear here.</pre>
+      </div>
       <p style="margin-top: 14px">
         This page loads <code>/loopit.wasm</code> and processes audio in a Web Audio callback.
       </p>
