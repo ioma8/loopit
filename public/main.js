@@ -7,7 +7,7 @@ let sourceNode = null;
 let processorNode = null;
 let stream = null;
 let wasm = null;
-let wasmPtr = 0;
+let wasmPtr = null;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -69,7 +69,7 @@ async function start() {
     // ScriptProcessor is simple and broadly supported for this demo.
     processorNode = audioCtx.createScriptProcessor(256, 1, 1);
     processorNode.onaudioprocess = (event) => {
-      if (!wasmPtr) {
+      if (wasmPtr === null) {
         return;
       }
 
@@ -89,7 +89,7 @@ async function start() {
     }
 
     stopBtn.disabled = false;
-    setStatus(`Running at ${sampleRate} Hz (context: ${audioCtx.state})`);
+    setStatus(`Running at ${sampleRate} Hz (context: ${audioCtx.state}, ptr: ${wasmPtr})`);
   } catch (error) {
     console.error(error);
     setStatus(`Error: ${error.message}`);
@@ -119,9 +119,9 @@ function stop() {
     audioCtx = null;
   }
 
-  if (wasm && wasmPtr) {
+  if (wasm && wasmPtr !== null) {
     wasm.loopit_free(wasmPtr);
-    wasmPtr = 0;
+    wasmPtr = null;
   }
 
   stopBtn.disabled = true;
