@@ -15,6 +15,9 @@ let lastRms = 0;
 let lastInputChannels = 0;
 let deviceSummary = "No device yet";
 
+const WEB_INPUT_GAIN = 10.0;
+const WEB_OUTPUT_GAIN = 4.0;
+
 function setStatus(message) {
   statusEl.textContent = message;
 }
@@ -166,7 +169,7 @@ async function start() {
         }
 
         energy += mono * mono;
-        const processed = module.loopit_process(wasmPtr, mono);
+        const processed = module.loopit_process(wasmPtr, mono * WEB_INPUT_GAIN) * WEB_OUTPUT_GAIN;
 
         for (let channel = 0; channel < outputChannels; channel += 1) {
           event.outputBuffer.getChannelData(channel)[i] = processed;
