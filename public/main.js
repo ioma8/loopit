@@ -39,6 +39,14 @@ async function start() {
     startBtn.disabled = true;
     setStatus("Requesting microphone...");
 
+    // Create/resume immediately inside the click gesture to satisfy autoplay policies.
+    if (!audioCtx) {
+      audioCtx = new AudioContext({ latencyHint: "interactive" });
+    }
+    if (audioCtx.state !== "running") {
+      await audioCtx.resume();
+    }
+
     const module = await loadWasm();
 
     stream = await navigator.mediaDevices.getUserMedia({
@@ -49,7 +57,10 @@ async function start() {
       },
     });
 
-    audioCtx = new AudioContext({ latencyHint: "interactive" });
+    if (audioCtx.state !== "running") {
+      await audioCtx.resume();
+    }
+
     const sampleRate = audioCtx.sampleRate;
     wasmPtr = module.loopit_new(sampleRate);
 
@@ -73,8 +84,12 @@ async function start() {
     sourceNode.connect(processorNode);
     processorNode.connect(audioCtx.destination);
 
+    if (audioCtx.state !== "running") {
+      await audioCtx.resume();
+    }
+
     stopBtn.disabled = false;
-    setStatus(`Running at ${sampleRate} Hz`);
+    setStatus(`Running at ${sampleRate} Hz (context: ${audioCtx.state})`);
   } catch (error) {
     console.error(error);
     setStatus(`Error: ${error.message}`);
