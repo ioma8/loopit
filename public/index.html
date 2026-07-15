@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loopit WASM Octaver</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #121a33;
+        --ink: #ecf0ff;
+        --muted: #b3bddb;
+        --accent: #4ee0b5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 20%, #1d2955, var(--bg));
+        color: var(--ink);
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .card {
+        width: min(760px, 100%);
+        background: linear-gradient(180deg, #1a2343, var(--panel));
+        border: 1px solid #32406b;
+        border-radius: 18px;
+        padding: 24px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 1.8rem;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .controls {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      #start {
+        background: var(--accent);
+        color: #0b1020;
+      }
+
+      #stop {
+        background: #ff6a88;
+        color: #1a0f17;
+      }
+
+      .status {
+        margin-top: 14px;
+        padding: 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        font-size: 0.95rem;
+      }
+
+      code {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Loopit Browser Octaver</h1>
+      <p>
+        Real-time microphone octave-down using Rust WebAssembly. Click start, allow microphone access,
+        and speak or sing.
+      </p>
+      <div class="controls">
+        <button id="start">Start</button>
+        <button id="stop" disabled>Stop</button>
+      </div>
+      <div class="status" id="status">Idle</div>
+      <p style="margin-top: 14px">
+        This page loads <code>/loopit.wasm</code> and processes audio in a Web Audio callback.
+      </p>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
