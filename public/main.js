@@ -38,6 +38,7 @@ async function updateDeviceSummary() {
 
     deviceSummary = [
       `selected input label: ${track?.label || "unknown"}`,
+      `track readyState/enabled/muted: ${track?.readyState || "unknown"} / ${track?.enabled ?? "unknown"} / ${track?.muted ?? "unknown"}`,
       `selected input settings: ${JSON.stringify(settings)}`,
       `available inputs: ${audioInputs.map((d) => d.label || d.deviceId).join(", ") || "none"}`,
       `available outputs: ${audioOutputs.map((d) => d.label || d.deviceId).join(", ") || "none"}`,
@@ -50,6 +51,14 @@ async function updateDeviceSummary() {
 
 function startDiagnostics() {
   stopDiagnostics();
+  setDebug([
+    `audioContext state: ${audioCtx ? audioCtx.state : "none"}`,
+    `wasm pointer: ${wasmPtr}`,
+    `script callbacks: ${callbackCount}`,
+    `input channels seen: ${lastInputChannels}`,
+    `last RMS: ${lastRms.toFixed(6)}`,
+    deviceSummary,
+  ].join("\n\n"));
   diagnosticsInterval = setInterval(() => {
     const contextState = audioCtx ? audioCtx.state : "none";
     setDebug([
@@ -114,6 +123,12 @@ async function start() {
       },
     });
     await updateDeviceSummary();
+    const track = stream.getAudioTracks()[0];
+    if (track) {
+      track.onmute = () => setDebug(`Track muted\n\n${deviceSummary}`);
+      track.onunmute = () => setDebug(`Track unmuted\n\n${deviceSummary}`);
+      track.onended = () => setDebug(`Track ended\n\n${deviceSummary}`);
+    }
 
     if (audioCtx.state !== "running") {
       await audioCtx.resume();
@@ -159,6 +174,17 @@ async function start() {
       }
 
       lastRms = Math.sqrt(energy / Math.max(event.outputBuffer.length, 1));
+
+      if (callbackCount <= 5 || callbackCount % 50 === 0) {
+        setDebug([
+          `audioContext state: ${audioCtx ? audioCtx.state : "none"}`,
+          `wasm pointer: ${wasmPtr}`,
+          `script callbacks: ${callbackCount}`,
+          `input channels seen: ${lastInputChannels}`,
+          `last RMS: ${lastRms.toFixed(6)}`,
+          deviceSummary,
+        ].join("\n\n"));
+      }
     };
 
     sourceNode.connect(processorNode);
