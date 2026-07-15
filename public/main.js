@@ -2,6 +2,9 @@ const statusEl = document.getElementById("status");
 const debugEl = document.getElementById("debug");
 const startBtn = document.getElementById("start");
 const stopBtn = document.getElementById("stop");
+const micGainSlider = document.getElementById("micGain");
+const micGainValueEl = document.getElementById("micGainValue");
+const speakerSafeCheckbox = document.getElementById("speakerSafe");
 
 let audioCtx = null;
 let sourceNode = null;
@@ -16,6 +19,7 @@ let lastInputChannels = 0;
 let deviceSummary = "No device yet";
 let adaptiveInputGain = 1.0;
 let lastOutputRms = 0;
+let userMicGain = Number.parseFloat(micGainSlider?.value ?? "1.5") || 1.5;
 
 const TARGET_INPUT_RMS = 0.02;
 const MIN_INPUT_GAIN = 1.0;
@@ -33,6 +37,12 @@ function setStatus(message) {
 
 function setDebug(message) {
   debugEl.textContent = message;
+}
+
+function updateMicGainLabel() {
+  if (micGainValueEl) {
+    micGainValueEl.textContent = `${userMicGain.toFixed(1)}x`;
+  }
 }
 
 async function updateDeviceSummary() {
@@ -69,8 +79,10 @@ function startDiagnostics() {
     `script callbacks: ${callbackCount}`,
     `input channels seen: ${lastInputChannels}`,
     `last RMS: ${lastRms.toFixed(6)}`,
+    `user mic gain: ${userMicGain.toFixed(2)}x`,
     `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
     `output RMS: ${lastOutputRms.toFixed(6)}`,
+    `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
     deviceSummary,
   ].join("\n\n"));
   diagnosticsInterval = setInterval(() => {
@@ -81,8 +93,10 @@ function startDiagnostics() {
       `script callbacks: ${callbackCount}`,
       `input channels seen: ${lastInputChannels}`,
       `last RMS: ${lastRms.toFixed(6)}`,
+      `user mic gain: ${userMicGain.toFixed(2)}x`,
       `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
       `output RMS: ${lastOutputRms.toFixed(6)}`,
+      `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
       deviceSummary,
     ].join("\n\n"));
   }, 300);
@@ -133,9 +147,9 @@ async function start() {
 
     stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
+        echoCancellation: speakerSafeCheckbox?.checked ?? false,
+        noiseSuppression: speakerSafeCheckbox?.checked ?? false,
+        autoGainControl: speakerSafeCheckbox?.checked ?? false,
       },
     });
     await updateDeviceSummary();
@@ -184,7 +198,7 @@ async function start() {
 
         inputEnergy += mono * mono;
 
-        const normalizedInput = mono * adaptiveInputGain;
+        const normalizedInput = mono * adaptiveInputGain * userMicGain;
         const processed = softClip(module.loopit_process(wasmPtr, normalizedInput) * POST_GAIN);
         outputEnergy += processed * processed;
 
@@ -209,8 +223,10 @@ async function start() {
           `script callbacks: ${callbackCount}`,
           `input channels seen: ${lastInputChannels}`,
           `last RMS: ${lastRms.toFixed(6)}`,
+          `user mic gain: ${userMicGain.toFixed(2)}x`,
           `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
           `output RMS: ${lastOutputRms.toFixed(6)}`,
+          `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
           deviceSummary,
         ].join("\n\n"));
       }
@@ -275,3 +291,10 @@ startBtn.addEventListener("click", () => {
 stopBtn.addEventListener("click", () => {
   stop();
 });
+
+micGainSlider?.addEventListener("input", () => {
+  userMicGain = Number.parseFloat(micGainSlider.value) || 1.5;
+  updateMicGainLabel();
+});
+
+updateMicGainLabel();

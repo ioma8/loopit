@@ -55,6 +55,32 @@
         gap: 10px;
       }
 
+      .settings {
+        margin-top: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .setting {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        color: var(--muted);
+      }
+
+      .setting strong {
+        color: var(--ink);
+      }
+
+      .setting input[type="range"] {
+        width: min(280px, 100%);
+      }
+
+      .setting input[type="checkbox"] {
+        transform: scale(1.2);
+      }
+
       button {
         border: 0;
         border-radius: 10px;
@@ -114,6 +140,25 @@
       <div class="controls">
         <button id="start">Start</button>
         <button id="stop" disabled>Stop</button>
+      </div>
+      <div class="settings">
+        <label class="setting">
+          <span>
+            <strong>Mic Gain</strong><br />
+            Adjust input level before the octave effect.
+          </span>
+          <span>
+            <input id="micGain" type="range" min="0.5" max="4" step="0.1" value="1.5" />
+            <strong id="micGainValue">1.5x</strong>
+          </span>
+        </label>
+        <label class="setting">
+          <span>
+            <strong>Speaker-Safe Mode</strong><br />
+            Enables browser echo cancellation for laptop-speaker use.
+          </span>
+          <input id="speakerSafe" type="checkbox" />
+        </label>
       </div>
       <div class="status" id="status">Idle</div>
       <div class="debug">
