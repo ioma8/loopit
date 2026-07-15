@@ -1,0 +1,8 @@
+[package]
+name = "loopit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.18.1"
+rtrb = "0.3"
