@@ -1,69 +1,18 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
-};
-use std::{
-    thread::sleep,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::{thread::sleep, time::Duration};
 
+mod pitch_analyser;
 mod synth;
-use synth::Synth;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use pitch_detection::detector::PitchDetector;
-use pitch_detection::detector::mcleod::McLeodDetector;
-use rtrb::{Consumer, Producer, RingBuffer};
+use pitch_analyser::PitchAnalyser;
+use synth::Synth;
 
 const TARGET_MAX_LATENCY_MS: f32 = 9.0;
 const BUFFER_FRAMES: u32 = 32;
 const EXTRA_QUEUE_FRAMES: usize = 32;
 const BUFFER_CAPACITY: usize = BUFFER_FRAMES as usize + EXTRA_QUEUE_FRAMES;
-const ANALYSIS_QUEUE_FRAMES: usize = 8192;
-const PITCH_WINDOW_SIZE: usize = 1024;
-const PITCH_WINDOW_HOP: usize = 512;
-const POWER_THRESHOLD: f64 = 0.2;
-const CLARITY_THRESHOLD: f64 = 0.5;
-const OUTPUT_SYNTH_FROM_PITCH: bool = true;
-const MIC_GAIN: f32 = 1.5;
 
-fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
-    frame.iter().copied().sum::<f32>() / input_channels as f32
-}
-
-struct InputProcessor {}
-
-impl InputProcessor {
-    fn new() -> Self {
-        Self {}
-    }
-
-    fn ingest_input(
-        &mut self,
-        data: &[f32],
-        input_channels: usize,
-        output_producer: &mut Producer<f32>,
-        analysis_producer: &mut Producer<f32>,
-    ) {
-        if input_channels == 0 {
-            return;
-        }
-
-        for frame in data.chunks_exact(input_channels) {
-            let mono = mix_to_mono(frame, input_channels) * MIC_GAIN;
-            let _ = analysis_producer.push(mono);
-
-            if !OUTPUT_SYNTH_FROM_PITCH {
-                let sample = self.process_sample(mono);
-                let _ = output_producer.push(sample);
-            }
-        }
-    }
-
-    fn process_sample(&mut self, sample: f32) -> f32 {
-        sample
-    }
-}
 
 fn main() {
     let host = cpal::default_host();
@@ -114,79 +63,17 @@ fn main() {
         estimated_latency_ms, TARGET_MAX_LATENCY_MS
     );
 
-    let (mut producer, mut consumer): (Producer<f32>, Consumer<f32>) =
-        RingBuffer::new(BUFFER_CAPACITY);
-    let (mut analysis_producer, mut analysis_consumer): (Producer<f32>, Consumer<f32>) =
-        RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
-    let mut input_processor = InputProcessor::new();
-    let mut last_output_sample = 0.0_f32;
     let output_sample_rate_hz = output_config.sample_rate as f32;
-
     let analysis_sample_rate = sample_rate_hz.round() as usize;
-    let analysis_running = Arc::new(AtomicBool::new(true));
-    let latest_pitch_hz_bits = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
-    let latest_pitch_clarity_bits = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
-    let analysis_running_thread = Arc::clone(&analysis_running);
-    let latest_pitch_hz_thread = Arc::clone(&latest_pitch_hz_bits);
-    let latest_pitch_clarity_thread = Arc::clone(&latest_pitch_clarity_bits);
-    let analysis_thread = std::thread::spawn(move || {
-        let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
-        let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
-        let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
 
-        while analysis_running_thread.load(Ordering::Relaxed) {
-            let mut made_progress = false;
-
-            while let Ok(sample) = analysis_consumer.pop() {
-                analysis_window.push(sample as f64);
-                made_progress = true;
-            }
-
-            while analysis_window.len() >= PITCH_WINDOW_SIZE {
-                if let Some(pitch) = detector.get_pitch(
-                    &analysis_window[..PITCH_WINDOW_SIZE],
-                    analysis_sample_rate,
-                    POWER_THRESHOLD,
-                    CLARITY_THRESHOLD,
-                ) {
-                    latest_pitch_hz_thread
-                        .store((pitch.frequency as f32).to_bits(), Ordering::Relaxed);
-                    latest_pitch_clarity_thread
-                        .store((pitch.clarity as f32).to_bits(), Ordering::Relaxed);
-
-                    let now = Instant::now();
-                    if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
-                        println!(
-                            "Pitch estimate: {:.2} Hz (clarity {:.3})",
-                            pitch.frequency, pitch.clarity
-                        );
-                        last_pitch_report = now;
-                    }
-                } else {
-                    latest_pitch_hz_thread.store(0.0_f32.to_bits(), Ordering::Relaxed);
-                    latest_pitch_clarity_thread.store(0.0_f32.to_bits(), Ordering::Relaxed);
-                }
-
-                analysis_window.drain(..PITCH_WINDOW_HOP);
-                made_progress = true;
-            }
-
-            if !made_progress {
-                sleep(Duration::from_millis(1));
-            }
-        }
-    });
+    let (mut analyser, mut analysis_producer) = PitchAnalyser::new(analysis_sample_rate);
+    let latest_pitch_hz_bits = analyser.latest_pitch_hz_bits();
 
     let input_stream = input_device
         .build_input_stream(
             input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                input_processor.ingest_input(
-                    data,
-                    input_channels,
-                    &mut producer,
-                    &mut analysis_producer,
-                );
+                PitchAnalyser::ingest_input(&mut analysis_producer, data, input_channels);
             },
             move |err| {
                 eprintln!("input stream error: {err}");
@@ -207,23 +94,9 @@ fn main() {
                     }
 
                     for frame in data.chunks_exact_mut(output_channels) {
-                        let sample = if OUTPUT_SYNTH_FROM_PITCH {
-                            let target_freq_hz =
-                                f32::from_bits(latest_pitch_hz_output.load(Ordering::Relaxed));
-                            synth.on_frame(target_freq_hz)
-                        } else {
-                            match consumer.pop() {
-                                Ok(sample) => {
-                                    last_output_sample = sample;
-                                    sample
-                                }
-                                Err(_) => {
-                                    // Avoid hard discontinuities on underflow.
-                                    last_output_sample *= 0.995;
-                                    last_output_sample
-                                }
-                            }
-                        };
+                        let target_freq_hz =
+                            f32::from_bits(latest_pitch_hz_output.load(std::sync::atomic::Ordering::Relaxed));
+                        let sample = synth.on_frame(target_freq_hz);
 
                         for out in frame.iter_mut() {
                             *out = sample;
@@ -246,6 +119,5 @@ fn main() {
         .expect("failed to start output audio stream");
 
     sleep(Duration::from_secs(20));
-    analysis_running.store(false, Ordering::Relaxed);
-    let _ = analysis_thread.join();
+    analyser.stop();
 }
