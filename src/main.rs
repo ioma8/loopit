@@ -2,6 +2,10 @@ use std::{
     thread::sleep,
     time::{Duration, Instant},
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use pitch_detection::detector::mcleod::McLeodDetector;
@@ -204,6 +208,49 @@ fn main() {
     let mut input_processor = InputProcessor::new(sample_rate_hz);
     let mut last_output_sample = 0.0_f32;
 
+    let analysis_sample_rate = sample_rate_hz.round() as usize;
+    let analysis_running = Arc::new(AtomicBool::new(true));
+    let analysis_running_thread = Arc::clone(&analysis_running);
+    let analysis_thread = std::thread::spawn(move || {
+        let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
+        let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
+        let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
+
+        while analysis_running_thread.load(Ordering::Relaxed) {
+            let mut made_progress = false;
+
+            while let Ok(sample) = analysis_consumer.pop() {
+                analysis_window.push(sample as f64);
+                made_progress = true;
+            }
+
+            while analysis_window.len() >= PITCH_WINDOW_SIZE {
+                if let Some(pitch) = detector.get_pitch(
+                    &analysis_window[..PITCH_WINDOW_SIZE],
+                    analysis_sample_rate,
+                    POWER_THRESHOLD,
+                    CLARITY_THRESHOLD,
+                ) {
+                    let now = Instant::now();
+                    if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
+                        println!(
+                            "Pitch estimate: {:.2} Hz (clarity {:.3})",
+                            pitch.frequency, pitch.clarity
+                        );
+                        last_pitch_report = now;
+                    }
+                }
+
+                analysis_window.drain(..PITCH_WINDOW_HOP);
+                made_progress = true;
+            }
+
+            if !made_progress {
+                sleep(Duration::from_millis(1));
+            }
+        }
+    });
+
     let input_stream = input_device
         .build_input_stream(
             input_config,
@@ -262,43 +309,7 @@ fn main() {
         .play()
         .expect("failed to start output audio stream");
 
-    let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
-    let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
-    let analysis_sample_rate = sample_rate_hz.round() as usize;
-    let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
-    let started_at = Instant::now();
-
-    while started_at.elapsed() < Duration::from_secs(20) {
-        let mut made_progress = false;
-
-        while let Ok(sample) = analysis_consumer.pop() {
-            analysis_window.push(sample as f64);
-            made_progress = true;
-        }
-
-        while analysis_window.len() >= PITCH_WINDOW_SIZE {
-            if let Some(pitch) = detector.get_pitch(
-                &analysis_window[..PITCH_WINDOW_SIZE],
-                analysis_sample_rate,
-                POWER_THRESHOLD,
-                CLARITY_THRESHOLD,
-            ) {
-                let now = Instant::now();
-                if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
-                    println!(
-                        "Pitch estimate: {:.2} Hz (clarity {:.3})",
-                        pitch.frequency, pitch.clarity
-                    );
-                    last_pitch_report = now;
-                }
-            }
-
-            analysis_window.drain(..PITCH_WINDOW_HOP);
-            made_progress = true;
-        }
-
-        if !made_progress {
-            sleep(Duration::from_millis(1));
-        }
-    }
+    sleep(Duration::from_secs(20));
+    analysis_running.store(false, Ordering::Relaxed);
+    let _ = analysis_thread.join();
 }
