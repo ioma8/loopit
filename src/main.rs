@@ -1,15 +1,15 @@
-use std::{
-    thread::sleep,
-    time::{Duration, Instant},
-};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
+use std::{
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
+use pitch_detection::detector::mcleod::McLeodDetector;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 const TARGET_MAX_LATENCY_MS: f32 = 9.0;
@@ -19,99 +19,23 @@ const BUFFER_CAPACITY: usize = BUFFER_FRAMES as usize + EXTRA_QUEUE_FRAMES;
 const ANALYSIS_QUEUE_FRAMES: usize = 8192;
 const PITCH_WINDOW_SIZE: usize = 1024;
 const PITCH_WINDOW_HOP: usize = 512;
-const POWER_THRESHOLD: f64 = 0.3;
+const POWER_THRESHOLD: f64 = 0.2;
 const CLARITY_THRESHOLD: f64 = 0.5;
 const OUTPUT_SYNTH_FROM_PITCH: bool = true;
-const SYNTH_FREQ_SMOOTH: f32 = 0.08;
-const SYNTH_GAIN: f32 = 0.50;
+const SYNTH_GAIN: f32 = 0.90;
 const SYNTH_GAIN_ATTACK: f32 = 0.02;
-const SYNTH_GAIN_RELEASE: f32 = 0.003;
-const SMOOTHING_ALPHA: f32 = 0.18;
+const SYNTH_GAIN_RELEASE: f32 = 0.001;
 const MIC_GAIN: f32 = 1.5;
-const LIMIT_CEILING: f32 = 0.95;
-const HP_CUTOFF_HZ: f32 = 60.0;
-const LP_CUTOFF_HZ: f32 = 420.0;
-const GATE_THRESHOLD: f32 = 0.008;
-const GATE_FLOOR: f32 = 0.02;
-const GATE_ATTACK: f32 = 0.20;
-const GATE_RELEASE: f32 = 0.01;
-const GATE_SMOOTH: f32 = 0.08;
-const ZC_THRESHOLD: f32 = 0.001;
-
-fn limit_sample(sample: f32) -> f32 {
-    let magnitude = sample.abs();
-
-    if magnitude > LIMIT_CEILING {
-        sample * (LIMIT_CEILING / magnitude)
-    } else {
-        sample
-    }
-}
 
 fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
     frame.iter().copied().sum::<f32>() / input_channels as f32
 }
 
-fn high_pass(sample: f32, previous_input: &mut f32, previous_output: &mut f32, alpha: f32) -> f32 {
-    let output = alpha * (*previous_output + sample - *previous_input);
-    *previous_input = sample;
-    *previous_output = output;
-    output
-}
-
-fn smooth_gate(level: f32, envelope: &mut f32, gain: &mut f32) -> f32 {
-    let env_coeff = if level > *envelope {
-        GATE_ATTACK
-    } else {
-        GATE_RELEASE
-    };
-    *envelope += env_coeff * (level - *envelope);
-
-    let target_gain = if *envelope < GATE_THRESHOLD {
-        GATE_FLOOR
-    } else {
-        1.0
-    };
-    *gain += GATE_SMOOTH * (target_gain - *gain);
-
-    *gain
-}
-
-struct InputProcessor {
-    smoothed: f32,
-    hp_prev_x: f32,
-    hp_prev_y: f32,
-    hp_alpha: f32,
-    lp_state: f32,
-    lp_alpha: f32,
-    gate_env: f32,
-    gate_gain: f32,
-    zc_prev: f32,
-    crossing_armed: bool,
-    polarity: f32,
-}
+struct InputProcessor {}
 
 impl InputProcessor {
-    fn new(sample_rate_hz: f32) -> Self {
-        let dt = 1.0 / sample_rate_hz.max(1.0);
-        let hp_rc = 1.0 / (2.0 * std::f32::consts::PI * HP_CUTOFF_HZ);
-        let hp_alpha = hp_rc / (hp_rc + dt);
-        let lp_rc = 1.0 / (2.0 * std::f32::consts::PI * LP_CUTOFF_HZ);
-        let lp_alpha = dt / (lp_rc + dt);
-
-        Self {
-            smoothed: 0.0,
-            hp_prev_x: 0.0,
-            hp_prev_y: 0.0,
-            hp_alpha,
-            lp_state: 0.0,
-            lp_alpha,
-            gate_env: 0.0,
-            gate_gain: 1.0,
-            zc_prev: 0.0,
-            crossing_armed: true,
-            polarity: 1.0,
-        }
+    fn new() -> Self {
+        Self {}
     }
 
     fn ingest_input(
@@ -137,26 +61,7 @@ impl InputProcessor {
     }
 
     fn process_sample(&mut self, sample: f32) -> f32 {
-        let high_passed = high_pass(sample, &mut self.hp_prev_x, &mut self.hp_prev_y, self.hp_alpha);
-        self.lp_state += self.lp_alpha * (high_passed - self.lp_state);
-        let vocal_band = self.lp_state;
-        let gate_gain = smooth_gate(vocal_band.abs(), &mut self.gate_env, &mut self.gate_gain);
-        let cleaned = vocal_band * gate_gain;
-
-        if cleaned <= -ZC_THRESHOLD {
-            self.crossing_armed = true;
-        }
-
-        if self.crossing_armed && self.zc_prev <= -ZC_THRESHOLD && cleaned >= ZC_THRESHOLD {
-            // Octave-divider trick: flip polarity once per positive-going crossing.
-            self.polarity = -self.polarity;
-            self.crossing_armed = false;
-        }
-        self.zc_prev = cleaned;
-
-        let divided = cleaned * self.polarity;
-        self.smoothed += SMOOTHING_ALPHA * (divided - self.smoothed);
-        limit_sample(self.smoothed)
+        sample
     }
 }
 
@@ -213,7 +118,7 @@ fn main() {
         RingBuffer::new(BUFFER_CAPACITY);
     let (mut analysis_producer, mut analysis_consumer): (Producer<f32>, Consumer<f32>) =
         RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
-    let mut input_processor = InputProcessor::new(sample_rate_hz);
+    let mut input_processor = InputProcessor::new();
     let mut last_output_sample = 0.0_f32;
     let output_sample_rate_hz = output_config.sample_rate as f32;
 
@@ -244,7 +149,8 @@ fn main() {
                     POWER_THRESHOLD,
                     CLARITY_THRESHOLD,
                 ) {
-                    latest_pitch_hz_thread.store((pitch.frequency as f32).to_bits(), Ordering::Relaxed);
+                    latest_pitch_hz_thread
+                        .store((pitch.frequency as f32).to_bits(), Ordering::Relaxed);
                     latest_pitch_clarity_thread
                         .store((pitch.clarity as f32).to_bits(), Ordering::Relaxed);
 
@@ -294,60 +200,68 @@ fn main() {
             output_config,
             {
                 let latest_pitch_hz_output = Arc::clone(&latest_pitch_hz_bits);
-                let latest_pitch_clarity_output = Arc::clone(&latest_pitch_clarity_bits);
-                let mut phase = 0.0_f32;
-                let mut smoothed_freq_hz = 110.0_f32;
+                let mut phase_sub = 0.0_f32;
+                let mut phase_norm = 0.0_f32;
+                let mut phase_sup = 0.0_f32;
                 let mut synth_level = 0.0_f32;
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                if output_channels == 0 {
-                    return;
-                }
+                    if output_channels == 0 {
+                        return;
+                    }
 
-                for frame in data.chunks_exact_mut(output_channels) {
-                    let sample = if OUTPUT_SYNTH_FROM_PITCH {
-                        let target_freq_hz =
-                            f32::from_bits(latest_pitch_hz_output.load(Ordering::Relaxed));
-                        let target_clarity =
-                            f32::from_bits(latest_pitch_clarity_output.load(Ordering::Relaxed));
+                    for frame in data.chunks_exact_mut(output_channels) {
+                        let sample = if OUTPUT_SYNTH_FROM_PITCH {
+                            let target_freq_hz =
+                                f32::from_bits(latest_pitch_hz_output.load(Ordering::Relaxed));
 
-                        let has_pitch = target_freq_hz > 0.0
-                            && target_freq_hz.is_finite()
-                            && target_clarity >= CLARITY_THRESHOLD as f32;
+                            let has_pitch = target_freq_hz > 0.0 && target_freq_hz.is_finite();
 
-                        if has_pitch {
-                            smoothed_freq_hz +=
-                                SYNTH_FREQ_SMOOTH * (target_freq_hz - smoothed_freq_hz);
-                            synth_level += SYNTH_GAIN_ATTACK * (SYNTH_GAIN - synth_level);
+                            if has_pitch {
+                                synth_level += SYNTH_GAIN_ATTACK * (SYNTH_GAIN - synth_level);
+                            } else {
+                                synth_level += SYNTH_GAIN_RELEASE * (0.0 - synth_level);
+                            }
+
+                            phase_sub += (2.0 * std::f32::consts::PI * target_freq_hz * 0.5)
+                                / output_sample_rate_hz;
+                            if phase_sub > std::f32::consts::TAU {
+                                phase_sub -= std::f32::consts::TAU;
+                            }
+
+                            phase_norm += (2.0 * std::f32::consts::PI * target_freq_hz)
+                                / output_sample_rate_hz;
+                            if phase_norm > std::f32::consts::TAU {
+                                phase_norm -= std::f32::consts::TAU;
+                            }
+
+                            phase_sup += (2.0 * std::f32::consts::PI * target_freq_hz * 2.0)
+                                / output_sample_rate_hz;
+                            if phase_sup > std::f32::consts::TAU {
+                                phase_sup -= std::f32::consts::TAU;
+                            }
+
+                            (phase_sub.sin() * synth_level)
+                                + (phase_norm.sin() * synth_level * 0.3)
+                                + (phase_sup.sin() * synth_level * 0.05)
                         } else {
-                            synth_level += SYNTH_GAIN_RELEASE * (0.0 - synth_level);
-                        }
-
-                        phase +=
-                            (2.0 * std::f32::consts::PI * smoothed_freq_hz) / output_sample_rate_hz;
-                        if phase > std::f32::consts::TAU {
-                            phase -= std::f32::consts::TAU;
-                        }
-
-                        phase.sin() * synth_level
-                    } else {
-                        match consumer.pop() {
-                            Ok(sample) => {
-                                last_output_sample = sample;
-                                sample
+                            match consumer.pop() {
+                                Ok(sample) => {
+                                    last_output_sample = sample;
+                                    sample
+                                }
+                                Err(_) => {
+                                    // Avoid hard discontinuities on underflow.
+                                    last_output_sample *= 0.995;
+                                    last_output_sample
+                                }
                             }
-                            Err(_) => {
-                                // Avoid hard discontinuities on underflow.
-                                last_output_sample *= 0.995;
-                                last_output_sample
-                            }
-                        }
-                    };
+                        };
 
-                    for out in frame.iter_mut() {
-                        *out = sample;
+                        for out in frame.iter_mut() {
+                            *out = sample;
+                        }
                     }
                 }
-            }
             },
             move |err| {
                 eprintln!("output stream error: {err}");
