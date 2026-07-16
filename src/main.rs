@@ -15,6 +15,7 @@ fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
 
 fn main() {
     let mut audio = Audio::new();
+    
     let input_channels = usize::from(audio.input_config.channels);
     let output_channels = usize::from(audio.output_config.channels);
     let analysis_sample_rate = audio.input_config.sample_rate as usize;
@@ -24,6 +25,7 @@ fn main() {
     let mut analysis_producer = analyser.take_producer();
     let latest_pitch_hz = analyser.latest_pitch_hz();
     let synth = Synth::new(output_sample_rate_hz);
+
     audio.set_callbacks(
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             if input_channels == 0 {
