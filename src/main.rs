@@ -1,13 +1,19 @@
-use std::{thread::sleep, time::Duration};
-
+mod cpal_setup;
 mod pitch_analyser;
 mod synth;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::{thread::sleep, time::Duration};
+
+use cpal::traits::{DeviceTrait, HostTrait};
+use cpal_setup::CpalSetup;
 use pitch_analyser::PitchAnalyser;
 use synth::Synth;
 
-const CALLBACK_BUFFER_SIZE: u32 = 32;
+const MIC_GAIN: f32 = 2.0;
+
+fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
+    frame.iter().copied().sum::<f32>() / input_channels as f32
+}
 
 fn main() {
     let host = cpal::default_host();
@@ -41,70 +47,54 @@ fn main() {
         );
     }
 
-    let mut input_config = input_supported_config.config();
-    let mut output_config = output_supported_config.config();
-
-    input_config.buffer_size = cpal::BufferSize::Fixed(CALLBACK_BUFFER_SIZE);
-    output_config.buffer_size = cpal::BufferSize::Fixed(CALLBACK_BUFFER_SIZE);
-
+    let input_config = input_supported_config.config();
+    let output_config = output_supported_config.config();
     let input_channels = usize::from(input_config.channels);
     let output_channels = usize::from(output_config.channels);
 
-    let sample_rate_hz = input_config.sample_rate as f32;
-
+    let analysis_sample_rate = input_config.sample_rate as usize;
     let output_sample_rate_hz = output_config.sample_rate as f32;
-    let analysis_sample_rate = sample_rate_hz.round() as usize;
 
-    let (mut analyser, mut analysis_producer) = PitchAnalyser::new(analysis_sample_rate);
+    let mut analyser = PitchAnalyser::new(analysis_sample_rate);
+    let mut analysis_producer = analyser.take_producer();
     let latest_pitch_hz = analyser.latest_pitch_hz();
+    let synth = Synth::new(output_sample_rate_hz);
+    let audio = CpalSetup::new(
+        &input_device,
+        &output_device,
+        &input_supported_config,
+        &output_supported_config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            if input_channels == 0 {
+                return;
+            }
 
-    let input_stream = input_device
-        .build_input_stream(
-            input_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                PitchAnalyser::ingest_input(&mut analysis_producer, data, input_channels);
-            },
-            move |err| {
-                eprintln!("input stream error: {err}");
-            },
-            None,
-        )
-        .expect("failed to build input stream");
+            for frame in data.chunks_exact(input_channels) {
+                let mono = mix_to_mono(frame, input_channels) * MIC_GAIN;
+                let _ = analysis_producer.push(mono);
+            }
+        },
+        {
+            let mut synth = synth;
+            let latest_pitch_hz_output = latest_pitch_hz.clone();
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                if output_channels == 0 {
+                    return;
+                }
 
-    let output_stream = output_device
-        .build_output_stream(
-            output_config,
-            {
-                let latest_pitch_hz_output = latest_pitch_hz.clone();
-                let mut synth = Synth::new(output_sample_rate_hz);
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if output_channels == 0 {
-                        return;
-                    }
+                for frame in data.chunks_exact_mut(output_channels) {
+                    let target_freq_hz = latest_pitch_hz_output.get();
+                    let sample = synth.on_frame(target_freq_hz);
 
-                    for frame in data.chunks_exact_mut(output_channels) {
-                        let target_freq_hz = latest_pitch_hz_output.get();
-                        let sample = synth.on_frame(target_freq_hz);
-
-                        for out in frame.iter_mut() {
-                            *out = sample;
-                        }
+                    for out in frame.iter_mut() {
+                        *out = sample;
                     }
                 }
-            },
-            move |err| {
-                eprintln!("output stream error: {err}");
-            },
-            None,
-        )
-        .expect("failed to build output stream");
+            }
+        },
+    );
 
-    input_stream
-        .play()
-        .expect("failed to start input audio stream");
-    output_stream
-        .play()
-        .expect("failed to start output audio stream");
+    audio.play();
 
     sleep(Duration::from_secs(20));
     analyser.stop();

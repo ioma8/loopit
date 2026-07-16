@@ -1,10 +1,10 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
+use pitch_detection::detector::mcleod::McLeodDetector;
 use rtrb::{Producer, RingBuffer};
 
 const ANALYSIS_QUEUE_FRAMES: usize = 8192;
@@ -12,16 +12,12 @@ const PITCH_WINDOW_SIZE: usize = 1024;
 const PITCH_WINDOW_HOP: usize = 512;
 const POWER_THRESHOLD: f64 = 0.1;
 const CLARITY_THRESHOLD: f64 = 0.4;
-const MIC_GAIN: f32 = 2.0;
-
-fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
-    frame.iter().copied().sum::<f32>() / input_channels as f32
-}
 
 pub struct PitchAnalyser {
     latest_pitch_hz: LatestPitchHz,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    producer: Option<Producer<f32>>,
 }
 
 #[derive(Clone)]
@@ -46,10 +42,10 @@ impl LatestPitchHz {
 }
 
 impl PitchAnalyser {
-    pub fn new(sample_rate_hz: usize) -> (Self, Producer<f32>) {
+    pub fn new(sample_rate_hz: usize) -> Self {
         let latest_pitch_hz = LatestPitchHz::new();
         let running = Arc::new(AtomicBool::new(true));
-        let (analysis_producer, mut analysis_consumer) = RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
+        let (producer, mut consumer) = RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
 
         let latest_pitch_hz_thread = latest_pitch_hz.clone();
         let running_thread = Arc::clone(&running);
@@ -62,7 +58,7 @@ impl PitchAnalyser {
             while running_thread.load(Ordering::Relaxed) {
                 let mut made_progress = false;
 
-                while let Ok(sample) = analysis_consumer.pop() {
+                while let Ok(sample) = consumer.pop() {
                     analysis_window.push(sample as f64);
                     made_progress = true;
                 }
@@ -98,14 +94,18 @@ impl PitchAnalyser {
             }
         });
 
-        (
-            Self {
-                latest_pitch_hz,
-                running,
-                thread: Some(thread),
-            },
-            analysis_producer,
-        )
+        Self {
+            latest_pitch_hz,
+            running,
+            thread: Some(thread),
+            producer: Some(producer),
+        }
+    }
+
+    pub fn take_producer(&mut self) -> Producer<f32> {
+        self.producer
+            .take()
+            .expect("analysis producer was already taken")
     }
 
     pub fn stop(&mut self) {
@@ -118,20 +118,5 @@ impl PitchAnalyser {
 
     pub fn latest_pitch_hz(&self) -> LatestPitchHz {
         self.latest_pitch_hz.clone()
-    }
-
-    pub fn ingest_input(
-        analysis_producer: &mut Producer<f32>,
-        data: &[f32],
-        input_channels: usize,
-    ) {
-        if input_channels == 0 {
-            return;
-        }
-
-        for frame in data.chunks_exact(input_channels) {
-            let mono = mix_to_mono(frame, input_channels) * MIC_GAIN;
-            let _ = analysis_producer.push(mono);
-        }
     }
 }
