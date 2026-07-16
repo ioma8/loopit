@@ -1,15 +1,22 @@
 use std::{
     thread::sleep,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use pitch_detection::detector::mcleod::McLeodDetector;
+use pitch_detection::detector::PitchDetector;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 const TARGET_MAX_LATENCY_MS: f32 = 9.0;
 const BUFFER_FRAMES: u32 = 32;
 const EXTRA_QUEUE_FRAMES: usize = 32;
 const BUFFER_CAPACITY: usize = BUFFER_FRAMES as usize + EXTRA_QUEUE_FRAMES;
+const ANALYSIS_QUEUE_FRAMES: usize = 8192;
+const PITCH_WINDOW_SIZE: usize = 1024;
+const PITCH_WINDOW_HOP: usize = 512;
+const POWER_THRESHOLD: f64 = 0.5;
+const CLARITY_THRESHOLD: f64 = 0.1;
 const SMOOTHING_ALPHA: f32 = 0.18;
 const MIC_GAIN: f32 = 1.5;
 const LIMIT_CEILING: f32 = 0.95;
@@ -102,7 +109,8 @@ impl InputProcessor {
         &mut self,
         data: &[f32],
         input_channels: usize,
-        producer: &mut Producer<f32>,
+        output_producer: &mut Producer<f32>,
+        analysis_producer: &mut Producer<f32>,
     ) {
         if input_channels == 0 {
             return;
@@ -110,8 +118,9 @@ impl InputProcessor {
 
         for frame in data.chunks_exact(input_channels) {
             let mono = mix_to_mono(frame, input_channels) * MIC_GAIN;
+            let _ = analysis_producer.push(mono);
             let sample = self.process_sample(mono);
-            let _ = producer.push(sample);
+            let _ = output_producer.push(sample);
         }
     }
 
@@ -190,6 +199,8 @@ fn main() {
 
     let (mut producer, mut consumer): (Producer<f32>, Consumer<f32>) =
         RingBuffer::new(BUFFER_CAPACITY);
+    let (mut analysis_producer, mut analysis_consumer): (Producer<f32>, Consumer<f32>) =
+        RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
     let mut input_processor = InputProcessor::new(sample_rate_hz);
     let mut last_output_sample = 0.0_f32;
 
@@ -197,7 +208,12 @@ fn main() {
         .build_input_stream(
             input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                input_processor.ingest_input(data, input_channels, &mut producer);
+                input_processor.ingest_input(
+                    data,
+                    input_channels,
+                    &mut producer,
+                    &mut analysis_producer,
+                );
             },
             move |err| {
                 eprintln!("input stream error: {err}");
@@ -246,5 +262,43 @@ fn main() {
         .play()
         .expect("failed to start output audio stream");
 
-    sleep(Duration::from_secs(20));
+    let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
+    let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
+    let analysis_sample_rate = sample_rate_hz.round() as usize;
+    let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
+    let started_at = Instant::now();
+
+    while started_at.elapsed() < Duration::from_secs(20) {
+        let mut made_progress = false;
+
+        while let Ok(sample) = analysis_consumer.pop() {
+            analysis_window.push(sample as f64);
+            made_progress = true;
+        }
+
+        while analysis_window.len() >= PITCH_WINDOW_SIZE {
+            if let Some(pitch) = detector.get_pitch(
+                &analysis_window[..PITCH_WINDOW_SIZE],
+                analysis_sample_rate,
+                POWER_THRESHOLD,
+                CLARITY_THRESHOLD,
+            ) {
+                let now = Instant::now();
+                if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
+                    println!(
+                        "Pitch estimate: {:.2} Hz (clarity {:.3})",
+                        pitch.frequency, pitch.clarity
+                    );
+                    last_pitch_report = now;
+                }
+            }
+
+            analysis_window.drain(..PITCH_WINDOW_HOP);
+            made_progress = true;
+        }
+
+        if !made_progress {
+            sleep(Duration::from_millis(1));
+        }
+    }
 }

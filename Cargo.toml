@@ -9,3 +9,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 cpal = "0.18.1"
 rtrb = "0.3"
+pitch-detection = "0.3"
