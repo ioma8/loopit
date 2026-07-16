@@ -52,40 +52,57 @@ impl PitchAnalyser {
 
         let thread = std::thread::spawn(move || {
             let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
-            let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
+            let mut analysis_ring = vec![0.0_f64; PITCH_WINDOW_SIZE * 2];
+            let mut write_pos = 0usize;
+            let mut filled = 0usize;
+            let mut samples_since_hop = 0usize;
             let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
 
             while running_thread.load(Ordering::Relaxed) {
                 let mut made_progress = false;
 
                 while let Ok(sample) = consumer.pop() {
-                    analysis_window.push(sample as f64);
-                    made_progress = true;
-                }
+                    let sample = sample as f64;
+                    analysis_ring[write_pos] = sample;
+                    analysis_ring[write_pos + PITCH_WINDOW_SIZE] = sample;
 
-                while analysis_window.len() >= PITCH_WINDOW_SIZE {
-                    if let Some(pitch) = detector.get_pitch(
-                        &analysis_window[..PITCH_WINDOW_SIZE],
-                        sample_rate_hz,
-                        POWER_THRESHOLD,
-                        CLARITY_THRESHOLD,
-                    ) {
-                        latest_pitch_hz_thread.set(pitch.frequency as f32);
-
-                        let now = Instant::now();
-                        if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
-                            println!(
-                                "Pitch estimate: {:.2} Hz (clarity {:.3})",
-                                pitch.frequency, pitch.clarity
-                            );
-                            last_pitch_report = now;
-                        }
-                    } else {
-                        latest_pitch_hz_thread.set(0.0_f32);
+                    write_pos += 1;
+                    if write_pos == PITCH_WINDOW_SIZE {
+                        write_pos = 0;
                     }
 
-                    analysis_window.drain(..PITCH_WINDOW_HOP);
+                    if filled < PITCH_WINDOW_SIZE {
+                        filled += 1;
+                    }
+
+                    samples_since_hop += 1;
                     made_progress = true;
+
+                    while filled == PITCH_WINDOW_SIZE && samples_since_hop >= PITCH_WINDOW_HOP {
+                        let window = &analysis_ring[write_pos..write_pos + PITCH_WINDOW_SIZE];
+
+                        if let Some(pitch) = detector.get_pitch(
+                            window,
+                            sample_rate_hz,
+                            POWER_THRESHOLD,
+                            CLARITY_THRESHOLD,
+                        ) {
+                            latest_pitch_hz_thread.set(pitch.frequency as f32);
+
+                            let now = Instant::now();
+                            if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
+                                println!(
+                                    "Pitch estimate: {:.2} Hz (clarity {:.3})",
+                                    pitch.frequency, pitch.clarity
+                                );
+                                last_pitch_report = now;
+                            }
+                        } else {
+                            latest_pitch_hz_thread.set(0.0_f32);
+                        }
+
+                        samples_since_hop -= PITCH_WINDOW_HOP;
+                    }
                 }
 
                 if !made_progress {
