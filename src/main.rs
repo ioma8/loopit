@@ -4,7 +4,7 @@ use std::{
 };
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,8 +19,13 @@ const BUFFER_CAPACITY: usize = BUFFER_FRAMES as usize + EXTRA_QUEUE_FRAMES;
 const ANALYSIS_QUEUE_FRAMES: usize = 8192;
 const PITCH_WINDOW_SIZE: usize = 1024;
 const PITCH_WINDOW_HOP: usize = 512;
-const POWER_THRESHOLD: f64 = 0.5;
-const CLARITY_THRESHOLD: f64 = 0.1;
+const POWER_THRESHOLD: f64 = 0.3;
+const CLARITY_THRESHOLD: f64 = 0.5;
+const OUTPUT_SYNTH_FROM_PITCH: bool = true;
+const SYNTH_FREQ_SMOOTH: f32 = 0.08;
+const SYNTH_GAIN: f32 = 0.50;
+const SYNTH_GAIN_ATTACK: f32 = 0.02;
+const SYNTH_GAIN_RELEASE: f32 = 0.003;
 const SMOOTHING_ALPHA: f32 = 0.18;
 const MIC_GAIN: f32 = 1.5;
 const LIMIT_CEILING: f32 = 0.95;
@@ -123,8 +128,11 @@ impl InputProcessor {
         for frame in data.chunks_exact(input_channels) {
             let mono = mix_to_mono(frame, input_channels) * MIC_GAIN;
             let _ = analysis_producer.push(mono);
-            let sample = self.process_sample(mono);
-            let _ = output_producer.push(sample);
+
+            if !OUTPUT_SYNTH_FROM_PITCH {
+                let sample = self.process_sample(mono);
+                let _ = output_producer.push(sample);
+            }
         }
     }
 
@@ -207,10 +215,15 @@ fn main() {
         RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
     let mut input_processor = InputProcessor::new(sample_rate_hz);
     let mut last_output_sample = 0.0_f32;
+    let output_sample_rate_hz = output_config.sample_rate as f32;
 
     let analysis_sample_rate = sample_rate_hz.round() as usize;
     let analysis_running = Arc::new(AtomicBool::new(true));
+    let latest_pitch_hz_bits = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+    let latest_pitch_clarity_bits = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
     let analysis_running_thread = Arc::clone(&analysis_running);
+    let latest_pitch_hz_thread = Arc::clone(&latest_pitch_hz_bits);
+    let latest_pitch_clarity_thread = Arc::clone(&latest_pitch_clarity_bits);
     let analysis_thread = std::thread::spawn(move || {
         let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
         let mut analysis_window: Vec<f64> = Vec::with_capacity(PITCH_WINDOW_SIZE * 2);
@@ -231,6 +244,10 @@ fn main() {
                     POWER_THRESHOLD,
                     CLARITY_THRESHOLD,
                 ) {
+                    latest_pitch_hz_thread.store((pitch.frequency as f32).to_bits(), Ordering::Relaxed);
+                    latest_pitch_clarity_thread
+                        .store((pitch.clarity as f32).to_bits(), Ordering::Relaxed);
+
                     let now = Instant::now();
                     if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
                         println!(
@@ -239,6 +256,9 @@ fn main() {
                         );
                         last_pitch_report = now;
                     }
+                } else {
+                    latest_pitch_hz_thread.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                    latest_pitch_clarity_thread.store(0.0_f32.to_bits(), Ordering::Relaxed);
                 }
 
                 analysis_window.drain(..PITCH_WINDOW_HOP);
@@ -272,21 +292,54 @@ fn main() {
     let output_stream = output_device
         .build_output_stream(
             output_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            {
+                let latest_pitch_hz_output = Arc::clone(&latest_pitch_hz_bits);
+                let latest_pitch_clarity_output = Arc::clone(&latest_pitch_clarity_bits);
+                let mut phase = 0.0_f32;
+                let mut smoothed_freq_hz = 110.0_f32;
+                let mut synth_level = 0.0_f32;
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if output_channels == 0 {
                     return;
                 }
 
                 for frame in data.chunks_exact_mut(output_channels) {
-                    let sample = match consumer.pop() {
-                        Ok(sample) => {
-                            last_output_sample = sample;
-                            sample
+                    let sample = if OUTPUT_SYNTH_FROM_PITCH {
+                        let target_freq_hz =
+                            f32::from_bits(latest_pitch_hz_output.load(Ordering::Relaxed));
+                        let target_clarity =
+                            f32::from_bits(latest_pitch_clarity_output.load(Ordering::Relaxed));
+
+                        let has_pitch = target_freq_hz > 0.0
+                            && target_freq_hz.is_finite()
+                            && target_clarity >= CLARITY_THRESHOLD as f32;
+
+                        if has_pitch {
+                            smoothed_freq_hz +=
+                                SYNTH_FREQ_SMOOTH * (target_freq_hz - smoothed_freq_hz);
+                            synth_level += SYNTH_GAIN_ATTACK * (SYNTH_GAIN - synth_level);
+                        } else {
+                            synth_level += SYNTH_GAIN_RELEASE * (0.0 - synth_level);
                         }
-                        Err(_) => {
-                            // Avoid hard discontinuities on underflow.
-                            last_output_sample *= 0.995;
-                            last_output_sample
+
+                        phase +=
+                            (2.0 * std::f32::consts::PI * smoothed_freq_hz) / output_sample_rate_hz;
+                        if phase > std::f32::consts::TAU {
+                            phase -= std::f32::consts::TAU;
+                        }
+
+                        phase.sin() * synth_level
+                    } else {
+                        match consumer.pop() {
+                            Ok(sample) => {
+                                last_output_sample = sample;
+                                sample
+                            }
+                            Err(_) => {
+                                // Avoid hard discontinuities on underflow.
+                                last_output_sample *= 0.995;
+                                last_output_sample
+                            }
                         }
                     };
 
@@ -294,6 +347,7 @@ fn main() {
                         *out = sample;
                     }
                 }
+            }
             },
             move |err| {
                 eprintln!("output stream error: {err}");
