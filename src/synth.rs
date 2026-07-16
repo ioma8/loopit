@@ -7,6 +7,9 @@ pub struct Synth {
     phase_sub: f32,
     phase_norm: f32,
     phase_sup: f32,
+    level_sub: f32,
+    level_norm: f32,
+    level_sup: f32,
     synth_level: f32,
 }
 
@@ -17,6 +20,9 @@ impl Synth {
             phase_sub: 0.0,
             phase_norm: 0.0,
             phase_sup: 0.0,
+            level_sub: 1.2,
+            level_norm: 0.5,
+            level_sup: 0.05,
             synth_level: 0.0,
         }
     }
@@ -45,8 +51,9 @@ impl Synth {
             self.phase_sup -= std::f32::consts::TAU;
         }
 
-        (self.phase_sub.sin() * self.synth_level)
-            + (self.phase_norm.sin() * self.synth_level * 0.3)
-            + (self.phase_sup.sin() * self.synth_level * 0.05)
+        ((self.phase_sub.sin() * self.synth_level * self.level_sub)
+            + (self.phase_norm.sin() * self.synth_level * self.level_norm)
+            + (self.phase_sup.sin() * self.synth_level * self.level_sup))
+            / (self.level_sub + self.level_norm + self.level_sup)
     }
 }
