@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod synth;
+use synth::Synth;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use pitch_detection::detector::PitchDetector;
 use pitch_detection::detector::mcleod::McLeodDetector;
@@ -22,9 +25,6 @@ const PITCH_WINDOW_HOP: usize = 512;
 const POWER_THRESHOLD: f64 = 0.2;
 const CLARITY_THRESHOLD: f64 = 0.5;
 const OUTPUT_SYNTH_FROM_PITCH: bool = true;
-const SYNTH_GAIN: f32 = 0.90;
-const SYNTH_GAIN_ATTACK: f32 = 0.02;
-const SYNTH_GAIN_RELEASE: f32 = 0.001;
 const MIC_GAIN: f32 = 1.5;
 
 fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
@@ -200,10 +200,7 @@ fn main() {
             output_config,
             {
                 let latest_pitch_hz_output = Arc::clone(&latest_pitch_hz_bits);
-                let mut phase_sub = 0.0_f32;
-                let mut phase_norm = 0.0_f32;
-                let mut phase_sup = 0.0_f32;
-                let mut synth_level = 0.0_f32;
+                let mut synth = Synth::new(output_sample_rate_hz);
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if output_channels == 0 {
                         return;
@@ -213,36 +210,7 @@ fn main() {
                         let sample = if OUTPUT_SYNTH_FROM_PITCH {
                             let target_freq_hz =
                                 f32::from_bits(latest_pitch_hz_output.load(Ordering::Relaxed));
-
-                            let has_pitch = target_freq_hz > 0.0 && target_freq_hz.is_finite();
-
-                            if has_pitch {
-                                synth_level += SYNTH_GAIN_ATTACK * (SYNTH_GAIN - synth_level);
-                            } else {
-                                synth_level += SYNTH_GAIN_RELEASE * (0.0 - synth_level);
-                            }
-
-                            phase_sub += (2.0 * std::f32::consts::PI * target_freq_hz * 0.5)
-                                / output_sample_rate_hz;
-                            if phase_sub > std::f32::consts::TAU {
-                                phase_sub -= std::f32::consts::TAU;
-                            }
-
-                            phase_norm += (2.0 * std::f32::consts::PI * target_freq_hz)
-                                / output_sample_rate_hz;
-                            if phase_norm > std::f32::consts::TAU {
-                                phase_norm -= std::f32::consts::TAU;
-                            }
-
-                            phase_sup += (2.0 * std::f32::consts::PI * target_freq_hz * 2.0)
-                                / output_sample_rate_hz;
-                            if phase_sup > std::f32::consts::TAU {
-                                phase_sup -= std::f32::consts::TAU;
-                            }
-
-                            (phase_sub.sin() * synth_level)
-                                + (phase_norm.sin() * synth_level * 0.3)
-                                + (phase_sup.sin() * synth_level * 0.05)
+                            synth.on_frame(target_freq_hz)
                         } else {
                             match consumer.pop() {
                                 Ok(sample) => {
