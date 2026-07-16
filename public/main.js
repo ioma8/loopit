@@ -17,19 +17,10 @@ let callbackCount = 0;
 let lastRms = 0;
 let lastInputChannels = 0;
 let deviceSummary = "No device yet";
-let adaptiveInputGain = 1.0;
 let lastOutputRms = 0;
-let userMicGain = Number.parseFloat(micGainSlider?.value ?? "1.5") || 1.5;
-
-const TARGET_INPUT_RMS = 0.02;
-const MIN_INPUT_GAIN = 1.0;
-const MAX_INPUT_GAIN = 18.0;
-const INPUT_GAIN_SMOOTH = 0.08;
-const POST_GAIN = 1.35;
-
-function softClip(sample) {
-  return Math.tanh(sample);
-}
+let userMicGain = Number.parseFloat(micGainSlider?.value ?? "1.0") || 1.0;
+let lastPitchHz = 0;
+let lastPitchClarity = 0;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -80,8 +71,8 @@ function startDiagnostics() {
     `input channels seen: ${lastInputChannels}`,
     `last RMS: ${lastRms.toFixed(6)}`,
     `user mic gain: ${userMicGain.toFixed(2)}x`,
-    `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
     `output RMS: ${lastOutputRms.toFixed(6)}`,
+    `pitch estimate: ${lastPitchHz.toFixed(2)} Hz (clarity ${lastPitchClarity.toFixed(3)})`,
     `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
     deviceSummary,
   ].join("\n\n"));
@@ -94,8 +85,8 @@ function startDiagnostics() {
       `input channels seen: ${lastInputChannels}`,
       `last RMS: ${lastRms.toFixed(6)}`,
       `user mic gain: ${userMicGain.toFixed(2)}x`,
-      `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
       `output RMS: ${lastOutputRms.toFixed(6)}`,
+      `pitch estimate: ${lastPitchHz.toFixed(2)} Hz (clarity ${lastPitchClarity.toFixed(3)})`,
       `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
       deviceSummary,
     ].join("\n\n"));
@@ -198,8 +189,8 @@ async function start() {
 
         inputEnergy += mono * mono;
 
-        const normalizedInput = mono * adaptiveInputGain * userMicGain;
-        const processed = softClip(module.loopit_process(wasmPtr, normalizedInput) * POST_GAIN);
+        const normalizedInput = mono * userMicGain;
+        const processed = module.loopit_process(wasmPtr, normalizedInput);
         outputEnergy += processed * processed;
 
         for (let channel = 0; channel < outputChannels; channel += 1) {
@@ -210,11 +201,10 @@ async function start() {
       lastRms = Math.sqrt(inputEnergy / Math.max(event.outputBuffer.length, 1));
       lastOutputRms = Math.sqrt(outputEnergy / Math.max(event.outputBuffer.length, 1));
 
-      const desiredGain = Math.min(
-        MAX_INPUT_GAIN,
-        Math.max(MIN_INPUT_GAIN, TARGET_INPUT_RMS / Math.max(lastRms, 0.0005)),
-      );
-      adaptiveInputGain += INPUT_GAIN_SMOOTH * (desiredGain - adaptiveInputGain);
+      if (module.loopit_get_pitch_hz && module.loopit_get_pitch_clarity) {
+        lastPitchHz = module.loopit_get_pitch_hz(wasmPtr) || 0;
+        lastPitchClarity = module.loopit_get_pitch_clarity(wasmPtr) || 0;
+      }
 
       if (callbackCount <= 5 || callbackCount % 50 === 0) {
         setDebug([
@@ -224,8 +214,8 @@ async function start() {
           `input channels seen: ${lastInputChannels}`,
           `last RMS: ${lastRms.toFixed(6)}`,
           `user mic gain: ${userMicGain.toFixed(2)}x`,
-          `adaptive input gain: ${adaptiveInputGain.toFixed(3)}`,
           `output RMS: ${lastOutputRms.toFixed(6)}`,
+          `pitch estimate: ${lastPitchHz.toFixed(2)} Hz (clarity ${lastPitchClarity.toFixed(3)})`,
           `speaker-safe mode: ${speakerSafeCheckbox?.checked ?? false}`,
           deviceSummary,
         ].join("\n\n"));
@@ -240,7 +230,7 @@ async function start() {
     }
 
     stopBtn.disabled = false;
-    setStatus(`Running at ${sampleRate} Hz (context: ${audioCtx.state}, ptr: ${wasmPtr})`);
+    setStatus(`Running at ${sampleRate} Hz (pitch: ${lastPitchHz.toFixed(1)} Hz)`);
     startDiagnostics();
   } catch (error) {
     console.error(error);
@@ -279,6 +269,8 @@ function stop() {
 
   stopBtn.disabled = true;
   startBtn.disabled = false;
+  lastPitchHz = 0;
+  lastPitchClarity = 0;
   setStatus("Stopped");
   stopDiagnostics();
   setDebug("Stopped");
@@ -293,7 +285,7 @@ stopBtn.addEventListener("click", () => {
 });
 
 micGainSlider?.addEventListener("input", () => {
-  userMicGain = Number.parseFloat(micGainSlider.value) || 1.5;
+  userMicGain = Number.parseFloat(micGainSlider.value) || 1.0;
   updateMicGainLabel();
 });
 

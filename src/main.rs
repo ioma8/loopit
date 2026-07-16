@@ -1,13 +1,13 @@
 mod audio;
+mod dsp;
 mod pitch_analyser;
 mod synth;
 
 use audio::Audio;
+use dsp::MIC_GAIN;
 use pitch_analyser::PitchAnalyser;
 use std::{thread::sleep, time::Duration};
 use synth::Synth;
-
-const MIC_GAIN: f32 = 2.0;
 
 fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
     frame.iter().copied().sum::<f32>() / input_channels as f32

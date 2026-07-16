@@ -3,15 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pitch_detection::detector::PitchDetector;
-use pitch_detection::detector::mcleod::McLeodDetector;
 use rtrb::{Producer, RingBuffer};
 
+use crate::dsp::{PitchTracker, PITCH_WINDOW_HOP};
+
 const ANALYSIS_QUEUE_FRAMES: usize = 8192;
-const PITCH_WINDOW_SIZE: usize = 1024;
-const PITCH_WINDOW_HOP: usize = 512;
-const POWER_THRESHOLD: f64 = 0.1;
-const CLARITY_THRESHOLD: f64 = 0.4;
 
 pub struct PitchAnalyser {
     latest_pitch_hz: LatestPitchHz,
@@ -51,57 +47,31 @@ impl PitchAnalyser {
         let running_thread = Arc::clone(&running);
 
         let thread = std::thread::spawn(move || {
-            let mut detector = McLeodDetector::<f64>::new(PITCH_WINDOW_SIZE, PITCH_WINDOW_SIZE / 2);
-            let mut analysis_ring = vec![0.0_f64; PITCH_WINDOW_SIZE * 2];
-            let mut write_pos = 0usize;
-            let mut filled = 0usize;
-            let mut samples_since_hop = 0usize;
+            let mut tracker = PitchTracker::new(sample_rate_hz);
+            let mut samples_since_report = 0usize;
             let mut last_pitch_report = Instant::now() - Duration::from_millis(250);
 
             while running_thread.load(Ordering::Relaxed) {
                 let mut made_progress = false;
 
                 while let Ok(sample) = consumer.pop() {
-                    let sample = sample as f64;
-                    analysis_ring[write_pos] = sample;
-                    analysis_ring[write_pos + PITCH_WINDOW_SIZE] = sample;
-
-                    write_pos += 1;
-                    if write_pos == PITCH_WINDOW_SIZE {
-                        write_pos = 0;
-                    }
-
-                    if filled < PITCH_WINDOW_SIZE {
-                        filled += 1;
-                    }
-
-                    samples_since_hop += 1;
+                    tracker.push_sample(sample);
+                    samples_since_report += 1;
                     made_progress = true;
 
-                    while filled == PITCH_WINDOW_SIZE && samples_since_hop >= PITCH_WINDOW_HOP {
-                        let window = &analysis_ring[write_pos..write_pos + PITCH_WINDOW_SIZE];
+                    latest_pitch_hz_thread.set(tracker.last_pitch_hz());
 
-                        if let Some(pitch) = detector.get_pitch(
-                            window,
-                            sample_rate_hz,
-                            POWER_THRESHOLD,
-                            CLARITY_THRESHOLD,
-                        ) {
-                            latest_pitch_hz_thread.set(pitch.frequency as f32);
-
-                            let now = Instant::now();
-                            if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
-                                println!(
-                                    "Pitch estimate: {:.2} Hz (clarity {:.3})",
-                                    pitch.frequency, pitch.clarity
-                                );
-                                last_pitch_report = now;
-                            }
-                        } else {
-                            latest_pitch_hz_thread.set(0.0_f32);
+                    if samples_since_report >= PITCH_WINDOW_HOP {
+                        let now = Instant::now();
+                        if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
+                            println!(
+                                "Pitch estimate: {:.2} Hz (clarity {:.3})",
+                                tracker.last_pitch_hz(),
+                                tracker.last_pitch_clarity()
+                            );
+                            last_pitch_report = now;
+                            samples_since_report = 0;
                         }
-
-                        samples_since_hop -= PITCH_WINDOW_HOP;
                     }
                 }
 
