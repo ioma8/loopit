@@ -22,7 +22,7 @@ impl Synth {
             phase_sup: 0.0,
             level_sub: 1.2,
             level_norm: 0.5,
-            level_sup: 0.05,
+            level_sup: 0.0,
             synth_level: 0.0,
         }
     }

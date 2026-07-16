@@ -5,32 +5,53 @@ use std::time::{Duration, Instant};
 
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
-use rtrb::{Consumer, Producer, RingBuffer};
+use rtrb::{Producer, RingBuffer};
 
 const ANALYSIS_QUEUE_FRAMES: usize = 8192;
 const PITCH_WINDOW_SIZE: usize = 1024;
 const PITCH_WINDOW_HOP: usize = 512;
-const POWER_THRESHOLD: f64 = 0.2;
-const CLARITY_THRESHOLD: f64 = 0.5;
-const MIC_GAIN: f32 = 1.5;
+const POWER_THRESHOLD: f64 = 0.1;
+const CLARITY_THRESHOLD: f64 = 0.4;
+const MIC_GAIN: f32 = 2.0;
 
 fn mix_to_mono(frame: &[f32], input_channels: usize) -> f32 {
     frame.iter().copied().sum::<f32>() / input_channels as f32
 }
 
 pub struct PitchAnalyser {
-    pub latest_pitch_hz_bits: Arc<AtomicU32>,
+    latest_pitch_hz: LatestPitchHz,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub struct LatestPitchHz {
+    bits: Arc<AtomicU32>,
+}
+
+impl LatestPitchHz {
+    fn new() -> Self {
+        Self {
+            bits: Arc::new(AtomicU32::new(0.0_f32.to_bits())),
+        }
+    }
+
+    pub fn set(&self, frequency_hz: f32) {
+        self.bits.store(frequency_hz.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.bits.load(Ordering::Relaxed))
+    }
+}
+
 impl PitchAnalyser {
     pub fn new(sample_rate_hz: usize) -> (Self, Producer<f32>) {
-        let latest_pitch_hz_bits = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        let latest_pitch_hz = LatestPitchHz::new();
         let running = Arc::new(AtomicBool::new(true));
         let (analysis_producer, mut analysis_consumer) = RingBuffer::new(ANALYSIS_QUEUE_FRAMES);
 
-        let latest_pitch_hz_thread = Arc::clone(&latest_pitch_hz_bits);
+        let latest_pitch_hz_thread = latest_pitch_hz.clone();
         let running_thread = Arc::clone(&running);
 
         let thread = std::thread::spawn(move || {
@@ -53,7 +74,7 @@ impl PitchAnalyser {
                         POWER_THRESHOLD,
                         CLARITY_THRESHOLD,
                     ) {
-                        latest_pitch_hz_thread.store((pitch.frequency as f32).to_bits(), Ordering::Relaxed);
+                        latest_pitch_hz_thread.set(pitch.frequency as f32);
 
                         let now = Instant::now();
                         if now.duration_since(last_pitch_report) >= Duration::from_millis(100) {
@@ -64,7 +85,7 @@ impl PitchAnalyser {
                             last_pitch_report = now;
                         }
                     } else {
-                        latest_pitch_hz_thread.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                        latest_pitch_hz_thread.set(0.0_f32);
                     }
 
                     analysis_window.drain(..PITCH_WINDOW_HOP);
@@ -79,7 +100,7 @@ impl PitchAnalyser {
 
         (
             Self {
-                latest_pitch_hz_bits,
+                latest_pitch_hz,
                 running,
                 thread: Some(thread),
             },
@@ -95,8 +116,8 @@ impl PitchAnalyser {
         }
     }
 
-    pub fn latest_pitch_hz_bits(&self) -> Arc<AtomicU32> {
-        Arc::clone(&self.latest_pitch_hz_bits)
+    pub fn latest_pitch_hz(&self) -> LatestPitchHz {
+        self.latest_pitch_hz.clone()
     }
 
     pub fn ingest_input(
