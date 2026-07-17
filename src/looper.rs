@@ -9,52 +9,53 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     io::{self, BufRead},
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
-        mpsc, Arc,
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
     time::Duration,
 };
 
-const IDLE: u8 = 0;
-const RECORDING: u8 = 1;
-const PLAYING: u8 = 2;
 const RECORDING_BUFFER_CAPACITY: usize = 1024 * 1024;
-const PLAYBACK_COMMAND_CAPACITY: usize = 2;
+const PLAYBACK_COMMAND_CAPACITY: usize = 4;
+
+enum PlaybackCommand {
+    Clear,
+    Play(Vec<f32>),
+}
 
 struct LoopRecorder {
     recorded_samples: Vec<f32>,
     recording_consumer: Consumer<f32>,
-    playback_producer: Producer<Vec<f32>>,
-    mode: Arc<AtomicU8>,
+    playback_producer: Producer<PlaybackCommand>,
+    recording: Arc<AtomicBool>,
     active_input_callbacks: Arc<AtomicUsize>,
-    recording: bool,
 }
 
 impl LoopRecorder {
     fn new(
         recording_consumer: Consumer<f32>,
-        playback_producer: Producer<Vec<f32>>,
-        mode: Arc<AtomicU8>,
+        playback_producer: Producer<PlaybackCommand>,
+        recording: Arc<AtomicBool>,
         active_input_callbacks: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             recorded_samples: Vec::new(),
             recording_consumer,
             playback_producer,
-            mode,
+            recording,
             active_input_callbacks,
-            recording: false,
         }
     }
 
     fn is_recording(&self) -> bool {
-        self.recording
+        self.recording.load(Ordering::Acquire)
     }
 
     /// Move samples from the realtime input callback into the control thread.
     fn poll(&mut self) {
-        if self.recording {
+        if self.is_recording() {
             while let Ok(sample) = self.recording_consumer.pop() {
                 self.recorded_samples.push(sample);
             }
@@ -66,13 +67,15 @@ impl LoopRecorder {
     fn start_recording(&mut self) {
         self.discard_pending_samples();
         self.recorded_samples.clear();
-        self.mode.store(RECORDING, Ordering::Release);
-        self.recording = true;
+        self.playback_producer
+            .push(PlaybackCommand::Clear)
+            .expect("playback command queue is unexpectedly full");
+        self.recording.store(true, Ordering::Release);
         println!("Recording...");
     }
 
     fn stop_recording(&mut self) {
-        self.mode.store(IDLE, Ordering::Release);
+        self.recording.store(false, Ordering::Release);
 
         // A callback may have started before the mode changed. Wait for it
         // before draining the queue so the final samples are not missed.
@@ -80,7 +83,6 @@ impl LoopRecorder {
             thread::yield_now();
         }
         self.drain_recording_samples();
-        self.recording = false;
 
         if self.recorded_samples.is_empty() {
             println!("The recording was empty; press Enter to try again.");
@@ -89,9 +91,10 @@ impl LoopRecorder {
 
         let loop_length = self.recorded_samples.len();
         self.playback_producer
-            .push(std::mem::take(&mut self.recorded_samples))
+            .push(PlaybackCommand::Play(std::mem::take(
+                &mut self.recorded_samples,
+            )))
             .expect("playback command queue is unexpectedly full");
-        self.mode.store(PLAYING, Ordering::Release);
         println!("Playing a {loop_length}-sample loop. Press Enter to record a new loop.");
     }
 
@@ -125,10 +128,10 @@ fn main() {
     let output_channels = usize::from(audio.output_config.channels);
     let (mut recording_producer, recording_consumer) = RingBuffer::new(RECORDING_BUFFER_CAPACITY);
     let (playback_producer, mut playback_consumer) = RingBuffer::new(PLAYBACK_COMMAND_CAPACITY);
-    let mode = Arc::new(AtomicU8::new(IDLE));
+    let recording = Arc::new(AtomicBool::new(false));
     let active_input_callbacks = Arc::new(AtomicUsize::new(0));
 
-    let input_mode = Arc::clone(&mode);
+    let input_recording = Arc::clone(&recording);
     let input_callbacks = Arc::clone(&active_input_callbacks);
 
     audio.set_callbacks(
@@ -137,7 +140,7 @@ fn main() {
 
             if input_channels != 0 {
                 for frame in data.chunks_exact(input_channels) {
-                    if input_mode.load(Ordering::Acquire) != RECORDING {
+                    if !input_recording.load(Ordering::Acquire) {
                         break;
                     }
 
@@ -149,8 +152,7 @@ fn main() {
             input_callbacks.fetch_sub(1, Ordering::Release);
         },
         {
-            let output_mode = Arc::clone(&mode);
-            let mut playback_buffer = Vec::new();
+            let mut playback_buffer = None;
             let mut playback_position = 0;
 
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -158,19 +160,24 @@ fn main() {
                     return;
                 }
 
-                while let Ok(next_loop) = playback_consumer.pop() {
-                    playback_buffer = next_loop;
-                    playback_position = 0;
+                while let Ok(command) = playback_consumer.pop() {
+                    match command {
+                        PlaybackCommand::Clear => playback_buffer = None,
+                        PlaybackCommand::Play(next_loop) => {
+                            playback_buffer = Some(next_loop);
+                            playback_position = 0;
+                        }
+                    }
                 }
 
-                let playing = output_mode.load(Ordering::Acquire) == PLAYING;
                 for frame in data.chunks_exact_mut(output_channels) {
-                    let sample = if playing && !playback_buffer.is_empty() {
-                        let sample = playback_buffer[playback_position];
-                        playback_position = (playback_position + 1) % playback_buffer.len();
-                        sample
-                    } else {
-                        0.0
+                    let sample = match playback_buffer.as_ref() {
+                        Some(loop_buffer) if !loop_buffer.is_empty() => {
+                            let sample = loop_buffer[playback_position];
+                            playback_position = (playback_position + 1) % loop_buffer.len();
+                            sample
+                        }
+                        _ => 0.0,
                     };
 
                     for out in frame.iter_mut() {
@@ -184,7 +191,7 @@ fn main() {
     let mut loop_recorder = LoopRecorder::new(
         recording_consumer,
         playback_producer,
-        Arc::clone(&mode),
+        Arc::clone(&recording),
         active_input_callbacks,
     );
 
