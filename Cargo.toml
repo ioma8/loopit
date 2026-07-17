@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "looper"
+path = "src/looper.rs"
+
 [dependencies]
 cpal = "0.18.1"
 rtrb = "0.3"
