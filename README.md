@@ -1,82 +1,113 @@
 # loopit
 
-Low-latency realtime vocal processing in Rust using CPAL, plus block-based pitch analysis using the McLeod Pitch Method (MPM).
+`loopit` is a microphone-driven pitch tracker that turns detected pitch into a synthesized output tone.
 
-## What runs where
+The repository currently has two front ends over the same core DSP:
 
-There are two separate paths in [src/main.rs](src/main.rs):
+- Native Rust app using CPAL for realtime audio I/O.
+- Browser demo using a small WASM interface and Web Audio.
 
-- Realtime audio path (device callback deadlines):
-  - Input callback reads mic data.
-  - Signal is processed (HP/LP filter, gate, octave-divider style polarity flip, smoothing, limiter).
-  - Samples are pushed to a small output ring buffer.
-  - Output callback pops samples and fills the output device buffer.
+## Current behavior
 
-- Analysis path (allowed to be delayed):
-  - Input callback also pushes raw mono mic samples into a larger analysis ring buffer.
-  - Main thread drains that queue and runs MPM on sliding 1024-sample windows.
-  - Pitch estimates are printed with clarity/confidence.
+The project is not an octave-divider or vocal FX pipeline anymore. The current signal flow is:
 
-This keeps heavy analysis off the realtime callback path.
+1. Read microphone input.
+2. Mix to mono and apply `MIC_GAIN`.
+3. Track pitch with the McLeod Pitch Method.
+4. Drive a simple synth from the latest detected pitch.
+5. Output the synth signal to speakers or headphones.
 
-## Why pitch detection is not in the callback
+When no stable pitch is detected, the synth fades down instead of producing a hard on/off transition.
 
-Audio callbacks are time-critical. Missing callback deadlines causes clicks/dropouts.
+## Native app architecture
 
-MPM is efficient, but still heavier than the simple per-sample DSP used for output. Running it in the callback would increase glitch risk, so it is intentionally done on the main thread over buffered blocks.
+The native executable in [src/main.rs](/Users/jakubkolcar/projects/customs/loopit/src/main.rs) splits work into two paths:
+
+- Input callback:
+  - Reads `f32` microphone samples from CPAL.
+  - Mixes multichannel input to mono.
+  - Applies mic gain.
+  - Pushes samples into a lock-free analysis queue.
+
+- Analysis thread:
+  - Drains the queue outside the realtime callback.
+  - Updates the latest detected pitch and clarity.
+  - Prints periodic pitch estimates for debugging.
+
+- Output callback:
+  - Reads the latest detected pitch.
+  - Generates synth samples in realtime.
+  - Writes the same sample to every output channel.
+
+This keeps pitch analysis off the audio callback's critical path.
+
+## DSP components
+
+The core DSP lives in [src/dsp.rs](/Users/jakubkolcar/projects/customs/loopit/src/dsp.rs).
+
+- `PitchTracker`
+  - Uses `pitch-detection`'s McLeod detector.
+  - Maintains a sliding analysis window.
+  - Exposes the last detected pitch and clarity.
+
+- `SynthCore`
+  - Generates a layered sine-based tone.
+  - Includes sub, fundamental, and optional upper partial voices.
+  - Smooths output level with separate attack and release behavior.
+
+## Browser demo
+
+The browser demo in [public/main.js](/Users/jakubkolcar/projects/customs/loopit/public/main.js) loads [public/loopit.wasm](/Users/jakubkolcar/projects/customs/loopit/public/loopit.wasm) and processes microphone audio through a Web Audio `ScriptProcessorNode`.
+
+The WASM layer in [src/lib.rs](/Users/jakubkolcar/projects/customs/loopit/src/lib.rs) exposes:
+
+- `loopit_new`
+- `loopit_process`
+- `loopit_reset`
+- `loopit_get_pitch_hz`
+- `loopit_get_pitch_clarity`
+- `loopit_free`
+
+That path runs pitch tracking and synthesis sample-by-sample in the browser-facing processor.
 
 ## Key constants
 
-Defined in [src/main.rs](src/main.rs):
+Defined in [src/dsp.rs](/Users/jakubkolcar/projects/customs/loopit/src/dsp.rs):
 
-- `BUFFER_FRAMES = 32`
-  - Requested device callback buffer size.
+- `MIC_GAIN = 2.0`
+- `PITCH_WINDOW_SIZE = 1024`
+- `PITCH_WINDOW_HOP = 512`
+- `POWER_THRESHOLD = 0.1`
+- `CLARITY_THRESHOLD = 0.4`
 
-- `EXTRA_QUEUE_FRAMES = 32`
-  - Extra headroom for the output queue to absorb callback timing mismatch.
-
-- `BUFFER_CAPACITY = BUFFER_FRAMES + EXTRA_QUEUE_FRAMES` (64)
-  - Capacity of realtime output ring buffer.
+Defined in [src/pitch_analyser.rs](/Users/jakubkolcar/projects/customs/loopit/src/pitch_analyser.rs):
 
 - `ANALYSIS_QUEUE_FRAMES = 8192`
-  - Larger queue used for delayed analysis path.
 
-- `PITCH_WINDOW_SIZE = 1024`
-  - MPM analysis frame size.
+Defined in [src/audio.rs](/Users/jakubkolcar/projects/customs/loopit/src/audio.rs):
 
-- `PITCH_WINDOW_HOP = 512`
-  - 50% overlap between analysis windows.
-
-- `POWER_THRESHOLD = 5.0`
-  - Minimum signal power to attempt pitch detection.
-
-- `CLARITY_THRESHOLD = 0.7`
-  - Minimum MPM confidence required to accept a pitch.
-
-## MPM thresholds explained
-
-For `detector.get_pitch(signal, sample_rate, power_threshold, clarity_threshold)`:
-
-- `power_threshold`
-  - Early gate on energy. If signal power is too low, returns no pitch.
-  - Higher value: fewer false triggers, less sensitivity.
-  - Lower value: more sensitivity, more false detections.
-
-- `clarity_threshold`
-  - Confidence gate on detected periodicity.
-  - Higher value: cleaner/stabler pitch output, more dropouts.
-  - Lower value: more continuous output, potentially more wrong estimates.
+- `CALLBACK_BUFFER_SIZE = 32`
 
 ## Build and run
+
+Run the native app:
 
 ```bash
 cargo run
 ```
 
-The app currently runs for 20 seconds and prints detected pitch lines when available.
+The native executable currently starts audio, runs for 20 seconds, and then stops.
+
+Build the browser WASM artifact:
+
+```bash
+./build-web.sh
+```
+
+This writes `public/loopit.wasm`.
 
 ## Dependencies
 
-- `cpal` for audio I/O
-- `rtrb` for lock-free SPSC ring buffers
-- `pitch-detection` for McLeod Pitch Method (MPM)
+- `cpal` for native audio I/O
+- `rtrb` for the native analysis queue
+- `pitch-detection` for McLeod pitch detection
